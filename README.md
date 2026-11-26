@@ -37,4 +37,11 @@ exe 만들기: `build_exe.bat` 실행 → `dist\JP-PDF EDITOR.exe`
   '도형 그리기' 하위 도형 선택(둥근 사각형·삼각형·양쪽 화살표 추가)
 - **v1.0** — 최초 버전
 
-PDF 엔진: [PyMuPDF](https://github.com/pymupdf/PyMuPDF)
+## 라이선스
+
+**무료 프로그램(프리웨어)** 입니다. 개인·회사 누구나 비용 없이 사용할 수 있습니다.
+
+소스 코드는 [GNU AGPL-3.0](LICENSE) 조건으로 공개합니다. 고쳐서 배포하는 경우 고친 소스도 같은 조건으로 공개해야 합니다.
+이 프로그램은 AGPL 라이선스인 PDF 엔진 [PyMuPDF](https://github.com/pymupdf/PyMuPDF)를 포함합니다.
+
+이 프로그램은 있는 그대로 제공되며, 사용으로 생긴 문제(파일 손상 등)에 대해 만든 사람은 책임지지 않습니다.
