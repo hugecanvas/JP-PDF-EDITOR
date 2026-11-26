@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-JP-PDF EDITOR  v1.1  -  설치 없이 쓰는 오프라인 PDF 편집기 (레이어 방식)
+JP-PDF EDITOR  v1.2  -  설치 없이 쓰는 오프라인 PDF 편집기 (레이어 방식)
+
+ v1.2 변경
+ * 화면 캡처(Win+Shift+S, PrtSc) 후 Ctrl+V -> 이미지 레이어로 붙여넣기
+   (탐색기에서 복사한 그림 파일도 가능, 모서리 핸들은 비율 유지, 작업 파일에 이미지 함께 저장)
 
  v1.1 (R01) 변경
  * 텍스트 레이어 상자가 글자 크기·내용에 맞춰 자동으로 맞춰짐 (크기 핸들을 끌면 글자 크기가 바뀜)
@@ -34,7 +38,7 @@ except ImportError:  # 구버전 호환
     import fitz
 
 APP_TITLE = "JP-PDF EDITOR"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 PROJ_EXT = ".pdfedit"
 THUMB_W, THUMB_H = 110, 140
 PAD = 12
@@ -267,13 +271,13 @@ def rect_p2v(r, geo):
 # ============================================================
 #  레이어 개체
 # ============================================================
-BOX_KINDS = ("text", "rect", "rrect", "oval", "triangle")
+BOX_KINDS = ("text", "rect", "rrect", "oval", "triangle", "image")
 LINE_KINDS = ("line", "arrow", "darrow")
 ARROW_KINDS = ("arrow", "darrow")
 KIND_LABEL = {"text": "텍스트", "rect": "사각형", "rrect": "둥근 사각형", "oval": "원", "triangle": "삼각형",
-              "line": "직선", "arrow": "화살표", "darrow": "양쪽 화살표", "highlight": "형광펜"}
+              "line": "직선", "arrow": "화살표", "darrow": "양쪽 화살표", "highlight": "형광펜", "image": "이미지"}
 KIND_ICON = {"text": "T", "rect": "▭", "rrect": "▢", "oval": "◯", "triangle": "△", "line": "╱",
-             "arrow": "➜", "darrow": "↔", "highlight": "▬"}
+             "arrow": "➜", "darrow": "↔", "highlight": "▬", "image": "▣"}
 # '도형 그리기' 도구 아래에서 고르는 도형 (순서 = 화면 표시 순서)
 SHAPE_TYPES = [("rect", "▭ 사각형"), ("rrect", "▢ 둥근 사각형"), ("oval", "◯ 원 / 타원"),
                ("triangle", "△ 삼각형"), ("line", "╱ 직선"), ("arrow", "➜ 화살표"),
@@ -282,6 +286,131 @@ RRECT_RADIUS = 0.2          # 둥근 사각형 모서리 반경 (짧은 변 대�
 # 텍스트 굵기: 글자 외곽선 두께 (글자 크기 대비 비율) - 어떤 글꼴이든 굵게 만들 수 있다
 WEIGHTS = [("보통", 0.0), ("약간 굵게", 0.025), ("굵게", 0.05), ("아주 굵게", 0.09)]
 WEIGHT_NAMES = [n for n, _ in WEIGHTS]
+
+
+# ---- 이미지 레이어: 그림 데이터는 개체가 아니라 여기에 한 번만 보관 (키 = 내용 해시)
+#   개체에는 키만 들어 있어 실행 취소 기록·복사가 가볍다. 작업 파일에는 images/<키>.png 로 저장.
+IMAGE_STORE = {}
+
+
+def store_image(png):
+    import hashlib
+    key = hashlib.sha1(png).hexdigest()[:20]
+    IMAGE_STORE[key] = png
+    return key
+
+
+def to_png(data):
+    """이미지 바이트(PNG/JPG/BMP 등) -> (PNG 바이트, 폭px, 높이px). 읽을 수 없으면 예외"""
+    pm = fitz.Pixmap(data)
+    if pm.colorspace and pm.colorspace.n not in (1, 3):    # CMYK 등 -> RGB
+        pm = fitz.Pixmap(fitz.csRGB, pm)
+    if pm.alpha:
+        a = bytes(pm.samples_mv[pm.n - 1::pm.n])
+        if not a or a.count(a[0]) == len(a):               # 캡처(32비트)처럼 알파가 전부 같으면 -> 불투명
+            pm = fitz.Pixmap(pm, 0)
+    return pm.tobytes("png"), pm.width, pm.height
+
+
+# ---- 윈도우 클립보드에서 이미지 읽기 (추가 라이브러리 없이 ctypes)
+CF_DIB, CF_HDROP = 8, 15
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff")
+
+
+def _clip_api():
+    import ctypes
+    from ctypes import wintypes as wt
+    u, k, s = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.shell32
+    u.OpenClipboard.argtypes = [wt.HWND]
+    u.GetClipboardData.argtypes = [wt.UINT]
+    u.GetClipboardData.restype = wt.HANDLE
+    u.IsClipboardFormatAvailable.argtypes = [wt.UINT]
+    u.RegisterClipboardFormatW.argtypes = [wt.LPCWSTR]
+    u.RegisterClipboardFormatW.restype = wt.UINT
+    k.GlobalLock.argtypes = [wt.HGLOBAL]
+    k.GlobalLock.restype = ctypes.c_void_p
+    k.GlobalUnlock.argtypes = [wt.HGLOBAL]
+    k.GlobalSize.argtypes = [wt.HGLOBAL]
+    k.GlobalSize.restype = ctypes.c_size_t
+    s.DragQueryFileW.argtypes = [wt.HANDLE, wt.UINT, wt.LPWSTR, wt.UINT]
+    s.DragQueryFileW.restype = wt.UINT
+    return ctypes, u, k, s
+
+
+def clipboard_seq():
+    try:
+        import ctypes
+        return ctypes.windll.user32.GetClipboardSequenceNumber()
+    except Exception:
+        return None
+
+
+def dib_to_bmp(dib):
+    """클립보드 CF_DIB(BITMAPINFO + 픽셀) 앞에 BMP 파일 머리를 붙인다"""
+    import struct
+    hsize, = struct.unpack_from("<I", dib, 0)
+    bpp, comp = struct.unpack_from("<HI", dib, 14)
+    used, = struct.unpack_from("<I", dib, 32)
+    off = hsize
+    if comp == 3 and hsize == 40:                 # BI_BITFIELDS: 색 마스크 3개
+        off += 12
+    if bpp <= 8:
+        off += 4 * (used or (1 << bpp))
+    return struct.pack("<2sIHHI", b"BM", 14 + len(dib), 0, 0, 14 + off) + dib
+
+
+def clipboard_image():
+    """클립보드의 이미지 -> 이미지 바이트. 캡처(PNG/비트맵) 또는 탐색기에서 복사한 그림 파일. 없으면 None"""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        ctypes, u, k, s = _clip_api()
+    except Exception:
+        return None
+    opened = False
+    for _ in range(10):                           # 다른 프로그램이 잠깐 잡고 있을 수 있다
+        if u.OpenClipboard(None):
+            opened = True
+            break
+        import time
+        time.sleep(0.05)
+    if not opened:
+        return None
+
+    def read(fmt):
+        h = u.GetClipboardData(fmt)
+        if not h:
+            return None
+        p = k.GlobalLock(h)
+        if not p:
+            return None
+        try:
+            return ctypes.string_at(p, k.GlobalSize(h))
+        finally:
+            k.GlobalUnlock(h)
+
+    try:
+        png_fmt = u.RegisterClipboardFormatW("PNG")
+        if png_fmt and u.IsClipboardFormatAvailable(png_fmt):
+            data = read(png_fmt)
+            if data:
+                return data
+        if u.IsClipboardFormatAvailable(CF_DIB):
+            data = read(CF_DIB)
+            if data:
+                return dib_to_bmp(data)
+        if u.IsClipboardFormatAvailable(CF_HDROP):
+            h = u.GetClipboardData(CF_HDROP)
+            n = s.DragQueryFileW(h, 0xFFFFFFFF, None, 0) if h else 0
+            for i in range(n):
+                buf = ctypes.create_unicode_buffer(1024)
+                s.DragQueryFileW(h, i, buf, 1024)
+                if buf.value.lower().endswith(IMG_EXTS) and os.path.isfile(buf.value):
+                    with open(buf.value, "rb") as f:
+                        return f.read()
+    finally:
+        u.CloseClipboard()
+    return None
 
 
 def weight_ratio(o):
@@ -299,6 +428,7 @@ class Obj:
         text="", font_kind="builtin", font_value="helv", font_label="",
         size=14.0, align=0, color="#000000", bg=None, auto_w=False,   # 텍스트/형광펜
         weight=0,                                                     # 텍스트 굵기 (WEIGHTS 번호)
+        img="", img_rot=0,                                            # 이미지: IMAGE_STORE 키, 붙일 때 페이지 회전
         stroke="#FF0000", fill=None, width=2.0, opacity=1.0)          # 도형
 
     def __init__(self, kind, **kw):
@@ -429,7 +559,7 @@ def render_bbox_p(o, geo):
     r = fitz.Rect(bbox_p(o, geo))
     if o.kind == "text":
         m = 3
-    elif o.kind == "highlight":
+    elif o.kind in ("highlight", "image"):
         m = 2
     else:
         m = o.width / 2 + 2 + (max(10.0, o.width * 5) if o.kind in ARROW_KINDS else 0)
@@ -452,6 +582,11 @@ def draw_obj(page, o, geo):
         page.insert_textbox(rect_v2p(inner, geo), o.text, fontsize=o.size,
                             color=col, align=o.align,
                             rotate=geo.rot, **bold, **spec.kwargs())
+    elif k == "image":
+        data = IMAGE_STORE.get(o.img)
+        if data:     # 붙일 때의 페이지 회전만큼 돌려 그 화면에서 바로 보이게. 나중에 페이지를 돌리면 함께 돈다
+            page.insert_image(fitz.Rect(o.rect).normalize(), stream=data, keep_proportion=False,
+                              rotate=o.img_rot, overlay=True)
     elif k == "highlight":
         for r in o.rects:
             page.draw_rect(fitz.Rect(r).normalize(), color=None, fill=hex_to_rgb(o.color),
@@ -535,7 +670,7 @@ def dist_seg(p, a, b):
 
 def obj_hit(o, pt, tol, geo):
     k = o.kind
-    if k == "text":
+    if k in ("text", "image"):
         r = bbox_p(o, geo)
         return fitz.Rect(r.x0 - tol, r.y0 - tol, r.x1 + tol, r.y1 + tol).contains(pt)
     if k == "highlight":
@@ -787,7 +922,7 @@ class PDFEditor(tk.Tk):
         e.add_command(label="실행 취소  (Ctrl+Z)", command=self.undo)
         e.add_separator()
         e.add_command(label="선택 개체 복사  (Ctrl+C)", command=self.copy_obj)
-        e.add_command(label="붙여넣기  (Ctrl+V)", command=self.paste_obj)
+        e.add_command(label="붙여넣기 - 개체 또는 캡처 이미지  (Ctrl+V)", command=self.paste_obj)
         e.add_command(label="선택 개체 복제  (Ctrl+D)", command=self.duplicate_obj)
         e.add_command(label="선택 개체 삭제  (Delete)", command=self.delete_obj)
         mb.add_cascade(label="편집", menu=e)
@@ -803,7 +938,7 @@ class PDFEditor(tk.Tk):
     def show_about(self):
         messagebox.showinfo(
             "정보", "%s  v%s\n\n설치 없이 실행하는 오프라인 PDF 편집기\n"
-                    "· 텍스트(페이지 위 바로 입력·굵기)/형광펜/도형 레이어 편집\n· 페이지 분할·병합·삭제·추가·순서 변경\n\n"
+                    "· 텍스트(페이지 위 바로 입력·굵기)/형광펜/도형/캡처 이미지 레이어 편집\n· 페이지 분할·병합·삭제·추가·순서 변경\n\n"
                     "PDF 엔진: PyMuPDF" % (APP_TITLE, APP_VERSION), parent=self)
 
     def _build_ui(self):
@@ -972,6 +1107,7 @@ class PDFEditor(tk.Tk):
                          text="[조작]\n· 텍스트: 클릭 후 바로 입력 (Ctrl+Enter·바깥 클릭=확정)\n"
                               "· 텍스트 핸들을 끌면 글자 크기 변경, 더블클릭=수정\n"
                               "· 선택: 드래그=이동, 핸들=크기, Delete=삭제\n"
+                              "· 화면 캡처(Win+Shift+S) 후 Ctrl+V=이미지 붙여넣기\n"
                               "· 방향키=미세 이동 (Shift=10pt)")
         hint.pack(anchor="w", padx=6, pady=4)
 
@@ -1044,11 +1180,24 @@ class PDFEditor(tk.Tk):
         c.bind("<Delete>", lambda e: self.delete_obj())
         c.bind("<Escape>", lambda e: self.select_obj(None))
         c.bind("<Control-c>", lambda e: self.copy_obj())
-        c.bind("<Control-v>", lambda e: self.paste_obj())
+        self.bind_all("<Control-v>", self._key_paste)      # 캡처 후 돌아왔을 때 초점이 어디 있든
+        self.bind_all("<Control-V>", self._key_paste)
         c.bind("<Control-d>", lambda e: self.duplicate_obj())
         for key, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
             c.bind("<%s>" % key, lambda e, dx=dx, dy=dy: self.nudge(dx, dy, 1))
             c.bind("<Shift-%s>" % key, lambda e, dx=dx, dy=dy: self.nudge(dx, dy, 10))
+
+    def _key_paste(self, e):
+        try:
+            w = self.focus_get()
+        except (KeyError, tk.TclError):
+            return
+        if isinstance(w, (tk.Text, tk.Entry, ttk.Entry, ttk.Spinbox, ttk.Combobox)):
+            return                      # 입력창 안에서는 글자 붙여넣기
+        if isinstance(w, tk.Toplevel) or (w is not None and w.winfo_toplevel() is not self):
+            return                      # 다른 창(병합·분할 대화상자 등)
+        self.paste_obj()
+        return "break"
 
     def _key_undo(self, e):
         w = self.focus_get()
@@ -1146,6 +1295,9 @@ class PDFEditor(tk.Tk):
             with zipfile.ZipFile(path) as z:
                 base = z.read("base.pdf")
                 lay = json.loads(z.read("layers.json").decode("utf-8"))
+                for n in z.namelist():                  # 이미지 레이어의 그림
+                    if n.startswith("images/") and n.endswith(".png"):
+                        IMAGE_STORE[n[7:-4]] = z.read(n)
         except Exception as e:
             messagebox.showerror(APP_TITLE, "작업 파일을 열 수 없습니다:\n%s" % e)
             return
@@ -1212,6 +1364,9 @@ class PDFEditor(tk.Tk):
             with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("base.pdf", data)
                 z.writestr("layers.json", json.dumps(lay, ensure_ascii=False))
+                for key in sorted({o.img for pg in self.layers for o in pg if o.kind == "image"}):
+                    if key in IMAGE_STORE:
+                        z.writestr("images/%s.png" % key, IMAGE_STORE[key], zipfile.ZIP_STORED)
             os.replace(tmp, path)
         except PermissionError:
             _silent_remove(tmp)
@@ -1679,7 +1834,7 @@ class PDFEditor(tk.Tk):
                 other = self.p2c(o.p1 if h == "p0" else o.p0)
                 self.canvas.create_line(other[0], other[1], cx, cy, fill="#0078d7", dash=(4, 3), tags="tmp")
             else:
-                r = self.resized_rect_v(d["rv0"], h, pv)
+                r = self.resized_rect_v(d["rv0"], h, pv, keep_ratio=(o.kind == "image"))
                 x0, y0 = self.v2c(r.x0, r.y0)
                 x1, y1 = self.v2c(r.x1, r.y1)
                 self.canvas.create_rectangle(x0, y0, x1, y1, outline="#0078d7", dash=(4, 3), tags="tmp")
@@ -1756,7 +1911,16 @@ class PDFEditor(tk.Tk):
         b = fitz.Point(dvx, dvy) * self.geo.derotm
         return (b.x - a.x, b.y - a.y)
 
-    def resized_rect_v(self, rv0, h, pv):
+    def resized_rect_v(self, rv0, h, pv, keep_ratio=False):
+        if keep_ratio and len(h) == 2 and rv0.width > 0 and rv0.height > 0:
+            # 모서리 핸들: 반대쪽 모서리를 고정하고 가로세로 비율 유지
+            ax = rv0.x1 if "w" in h else rv0.x0
+            ay = rv0.y1 if "n" in h else rv0.y0
+            s = max(abs(pv.x - ax) / rv0.width, abs(pv.y - ay) / rv0.height, 6 / min(rv0.width, rv0.height))
+            w, hh = rv0.width * s, rv0.height * s
+            x0 = ax - w if "w" in h else ax
+            y0 = ay - hh if "n" in h else ay
+            return fitz.Rect(x0, y0, x0 + w, y0 + hh)
         x0, y0, x1, y1 = rv0.x0, rv0.y0, rv0.x1, rv0.y1
         if "w" in h:
             x0 = pv.x
@@ -1781,7 +1945,7 @@ class PDFEditor(tk.Tk):
             else:
                 o.p1 = (p.x, p.y)
             return
-        r = self.resized_rect_v(rv0, h, pv)
+        r = self.resized_rect_v(rv0, h, pv, keep_ratio=(o.kind == "image"))
         if o.kind == "text":
             self.scale_text(o, h, rv0, r)
             return
@@ -2076,6 +2240,8 @@ class PDFEditor(tk.Tk):
             elif o.kind == "highlight":
                 self._set_color("hl", o.color)
                 self.hl_opacity_var.set(int(round(o.opacity * 100)))
+            elif o.kind == "image":
+                pass
             else:
                 self._set_color("stroke", o.stroke)
                 self.fill_none.set(o.fill is None)
@@ -2127,6 +2293,8 @@ class PDFEditor(tk.Tk):
             elif o.kind == "highlight":
                 op = min(1.0, max(0.05, self.hl_opacity_var.get() / 100.0))
                 o.color, o.opacity = self.colors["hl"], op
+            elif o.kind == "image":
+                return False
             else:
                 w = max(0.1, float(self.width_var.get()))
                 op = min(1.0, max(0.05, self.opacity_var.get() / 100.0))
@@ -2265,11 +2433,22 @@ class PDFEditor(tk.Tk):
         if o is None:
             return
         self._clip = (o.to_dict(), self.cur)
+        self._clip_seq = clipboard_seq()
         self._paste_n = 0
         self.set_status("복사됨 - 원하는 페이지에서 붙여넣기(Ctrl+V)")
 
     def paste_obj(self):
-        if not self._clip or self.doc is None:
+        """Ctrl+V: 개체를 복사한 뒤 새로 캡처(클립보드 변경)했으면 캡처 이미지, 아니면 복사한 개체"""
+        if self.doc is None:
+            return
+        self.finish_inline_edit()
+        if not self._clip or clipboard_seq() != getattr(self, "_clip_seq", None):
+            data = clipboard_image()
+            if data:
+                self.paste_image(data)
+                return
+        if not self._clip:
+            self.set_status("붙여 넣을 것이 없습니다 - 화면을 캡처(Win+Shift+S)하거나 개체를 복사(Ctrl+C)하세요")
             return
         d, page = self._clip
         n = Obj.from_dict(d)
@@ -2282,6 +2461,26 @@ class PDFEditor(tk.Tk):
         self.layers[self.cur].append(n)
         self.sel_id = n.id
         self.commit(pre, "붙여넣기 완료")
+
+    def paste_image(self, data):
+        """캡처 이미지를 지금 보이는 화면 가운데에 이미지 레이어로 붙인다.
+        크기는 캡처한 화면 크기 그대로(현재 확대 비율 기준), 페이지보다 크면 페이지 안으로 줄인다."""
+        try:
+            png, pw, ph = to_png(data)
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, "클립보드 이미지를 읽을 수 없습니다:\n%s" % e)
+            return
+        key = store_image(png)
+        w, h = pw / self.zoom, ph / self.zoom
+        s = min(1.0, self.geo.vw * 0.9 / w, self.geo.vh * 0.9 / h)
+        w, h = w * s, h * s
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        c = self.c2v(self.canvas.canvasx(cw / 2), self.canvas.canvasy(ch / 2))
+        x0 = min(max(c.x - w / 2, 0), self.geo.vw - w)
+        y0 = min(max(c.y - h / 2, 0), self.geo.vh - h)
+        o = Obj("image", rect=tuple(rect_v2p(fitz.Rect(x0, y0, x0 + w, y0 + h), self.geo)), img=key,
+                img_rot=self.geo.rot)
+        self.add_obj(o, "이미지 붙여넣기 완료 (%dx%d px)" % (pw, ph))
 
     def copy_to_all_pages(self):
         o = self.need_sel()
@@ -2603,6 +2802,21 @@ def selftest(logpath):
         chk("굵기 지정 시 상자 여유", c.width > b.width, "%.1f -> %.1f" % (b.width, c.width))
         old = Obj.from_dict({"kind": "text", "rect": [0, 0, 50, 20], "text": "x"})
         chk("구버전 작업파일 호환 (굵기 없음)", old.weight == 0)
+        # v1.2: 캡처 이미지(클립보드 비트맵) -> PNG -> 이미지 레이어
+        import struct
+        bw_, bh_ = 30, 20
+        px = b"".join(bytes([255, 120, 0, 0]) for _ in range(bw_ * bh_))        # 32비트, 알파 0
+        dib = struct.pack("<IiiHHIIiiII", 40, bw_, bh_, 1, 32, 0, len(px), 2835, 2835, 0, 0) + px
+        png, pw_, ph_ = to_png(dib_to_bmp(dib))
+        chk("클립보드 비트맵 -> PNG", (pw_, ph_) == (bw_, bh_) and not fitz.Pixmap(png).alpha,
+            "%dx%d" % (pw_, ph_))
+        key = store_image(png)
+        d3 = fitz.open()
+        p3 = d3.new_page(width=200, height=100)
+        p3.set_rotation(90)
+        apply_objects(p3, [Obj("image", rect=(20, 20, 80, 60), img=key)])
+        chk("이미지 레이어 PDF 합치기", len(p3.get_images()) == 1)
+        chk("클립보드 읽기 API", clipboard_seq() is not None)
     except Exception as e:
         import traceback
         chk("예외 없이 완료", False, repr(e) + "\n" + traceback.format_exc())
