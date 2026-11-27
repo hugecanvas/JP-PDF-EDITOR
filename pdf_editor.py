@@ -740,6 +740,110 @@ def tk_family(label):
 
 
 # ============================================================
+#  화면 배율 / 스크롤 영역
+# ============================================================
+def screen_work_area(root):
+    """작업 표시줄을 뺀 화면 영역 (x, y, 폭, 높이)"""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            from ctypes import wintypes
+            r = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0):  # SPI_GETWORKAREA
+                return r.left, r.top, r.right - r.left, r.bottom - r.top
+        except Exception:
+            pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight() - 60
+
+
+class ScrollFrame(ttk.Frame):
+    """세로 스크롤 영역 (내용은 .body 에 넣는다).
+    공간이 넉넉하면 내용이 영역 높이만큼 늘어나고, 모자라면 스크롤바가 나타나 마우스 휠로 내려 볼 수 있다.
+    (화면 배율 125%·150%나 세로가 낮은 화면에서 오른쪽 속성 패널 아래쪽이 잘리던 문제)"""
+
+    def __init__(self, master, step=20, measure=None):
+        super().__init__(master)
+        self.measure = measure          # 필요한 내용 높이를 직접 셀 함수 (없으면 내용의 요청 높이)
+        self.canvas = tk.Canvas(self, width=1, height=1, highlightthickness=0, bd=0,
+                                yscrollincrement=step, takefocus=0)
+        bg = ttk.Style().lookup("TFrame", "background")
+        if bg:
+            self.canvas.configure(bg=bg)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vsb.grid(row=0, column=1, sticky="ns")
+        self.vsb.grid_remove()
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.body = ttk.Frame(self.canvas)
+        self._win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
+        self._last = None
+        self._acc = 0
+        self._tag = "ScrollFrame%d" % id(self)
+        self.canvas.bind("<Configure>", self._relayout)
+        self.body.bind("<Configure>", self._relayout)
+        self.bind_class(self._tag, "<MouseWheel>", self._on_wheel)
+        self.bind_class(self._tag, "<Button-4>", lambda e: self._on_wheel(e, 120))
+        self.bind_class(self._tag, "<Button-5>", lambda e: self._on_wheel(e, -120))
+
+    def content_width(self):
+        """내용이 잘리지 않는 폭 (스크롤바 포함)"""
+        return self.body.winfo_reqwidth() + self.vsb.winfo_reqwidth()
+
+    def refresh(self):
+        self._last = None
+        self._relayout()
+
+    def _relayout(self, event=None):
+        c = self.canvas
+        bw = self.body.winfo_reqwidth()
+        bh = self.measure() if self.measure else self.body.winfo_reqheight()
+        if int(float(c.cget("width"))) != bw:
+            c.configure(width=bw)                       # 패널이 요청하는 폭 = 내용 폭
+        cw, ch = c.winfo_width(), c.winfo_height()
+        if ch <= 1:
+            return
+        h = max(ch, bh)
+        state = (cw, h, bh > ch)
+        if state == self._last:
+            return
+        self._last = state
+        c.itemconfigure(self._win, width=cw, height=h)
+        c.configure(scrollregion=(0, 0, cw, h))
+        if bh > ch:
+            self.vsb.grid()
+        else:
+            self.vsb.grid_remove()
+            c.yview_moveto(0)
+
+    def watch(self):
+        """영역 안 위젯 위에서 마우스 휠을 굴리면 영역이 스크롤되게 한다 (위젯을 다 만든 뒤 호출).
+        목록(Treeview)과 그 스크롤바는 제 스크롤을 그대로 쓴다."""
+        def add(w):
+            if not isinstance(w, (ttk.Treeview, ttk.Scrollbar)) or w is self.vsb:
+                tags = w.bindtags()
+                if self._tag not in tags:
+                    w.bindtags((tags[0], self._tag) + tags[1:])     # 클래스 바인딩보다 먼저
+            for ch in w.winfo_children():
+                add(ch)
+        add(self)
+
+    def _on_wheel(self, e, delta=None):
+        if not self.vsb.winfo_ismapped():
+            return None                                 # 다 보이면 원래 동작 그대로
+        w = e.widget
+        if isinstance(w, (ttk.Combobox, ttk.Spinbox)) and w.focus_get() is w:
+            return None                                 # 입력 중인 값 칸은 휠로 값 변경 (원래 동작)
+        self._acc += e.delta if delta is None else delta
+        n = int(self._acc / 120)
+        if n:
+            self._acc -= n * 120
+            self.canvas.yview_scroll(-n * 3, "units")
+        return "break"
+
+
+# ============================================================
 #  보조 대화상자
 # ============================================================
 
@@ -835,8 +939,8 @@ class PDFEditor(tk.Tk):
     def __init__(self, initial=None):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1420x860")
-        self.minsize(1040, 620)
+        self.ui = max(1.0, self.winfo_fpixels("1i") / 96.0)     # 화면 배율 (125% -> 1.25)
+        self._fit_window()
         try:
             self.iconbitmap(resource_path("jp_pdf.ico"))
         except Exception:
@@ -895,13 +999,31 @@ class PDFEditor(tk.Tk):
         if initial and os.path.isfile(initial):
             self.after(200, lambda: self.open_path(initial))
 
+    def _fit_window(self):
+        """첫 창 크기: 1420x900(배율 100% 기준)에 화면 배율을 곱하되,
+        작업 표시줄을 뺀 화면에 다 들어가지 않으면 최대화해서 창 아래쪽이 화면 밖으로 나가지 않게 한다"""
+        s = self.ui
+        x0, y0, aw, ah = screen_work_area(self)
+        fw, fh = int(20 * s), int(70 * s)               # 창 테두리 + 제목 표시줄 + 메뉴 여유
+        w, h = int(1420 * s), int(900 * s)
+        self.minsize(min(int(1040 * s), aw - fw), min(620, ah - fh))
+        if w + fw <= aw and h + fh <= ah:
+            self.geometry("%dx%d+%d+%d" % (w, h, x0 + (aw - w - fw) // 2, y0 + (ah - h - fh) // 2))
+        else:
+            self.geometry("%dx%d+%d+%d" % (min(w, aw - fw), min(h, ah - fh), x0, y0))
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
+
     def _init_layout(self):
-        """창이 완전히 뜬 뒤 좌/우 패널 폭을 기본값(250 / 300)으로 맞춘다"""
+        """창이 뜬 뒤 오른쪽 패널 폭을 내용이 가로로 잘리지 않는 폭(기본 300, 화면 배율 반영) 이상으로 맞춘다.
+        (예전에는 sash_place로 옮겼는데, Tk가 곧바로 최소 폭으로 되돌려 오른쪽 글자가 잘렸다)"""
         try:
-            w = self.paned.winfo_width()
-            if w > 900:
-                self.paned.sash_place(0, 250, 0)
-                self.paned.sash_place(1, w - 300, 0)
+            s = self.ui
+            rw = max(int(300 * s), self.right_panel.content_width())
+            if self.paned.winfo_width() - int(250 * s) - rw >= int(420 * s):
+                self.paned.paneconfigure(self.right_panel, width=rw)
         except tk.TclError:
             pass
 
@@ -942,20 +1064,24 @@ class PDFEditor(tk.Tk):
                     "PDF 엔진: PyMuPDF" % (APP_TITLE, APP_VERSION), parent=self)
 
     def _build_ui(self):
+        s = self.ui
         main = tk.PanedWindow(self, orient="horizontal", sashwidth=6, sashrelief="raised", bd=0)
         main.pack(fill="both", expand=True)
         self.paned = main
 
         # ---- 왼쪽: 썸네일 + 페이지 버튼
         left = ttk.Frame(main)
-        main.add(left, minsize=210, width=250, stretch="never")
+        main.add(left, minsize=int(210 * s), width=int(250 * s), stretch="never")
         style = ttk.Style()
         style.configure("Thumb.Treeview", rowheight=THUMB_H + 12,
                         background="#c9c9c9", fieldbackground="#c9c9c9")
         style.map("Thumb.Treeview", background=[("selected", "#3a6ea5")])
+        # 페이지 버튼을 먼저 아래에 붙여야 썸네일 목록(요청 높이가 큼)에 밀려 사라지지 않는다
+        pb = ttk.LabelFrame(left, text="페이지 편집 (Ctrl/Shift로 다중 선택)")
+        pb.pack(side="bottom", fill="x", padx=4, pady=4)
         tf = ttk.Frame(left)
         tf.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tf, show="tree", selectmode="extended", style="Thumb.Treeview")
+        self.tree = ttk.Treeview(tf, show="tree", selectmode="extended", style="Thumb.Treeview", height=3)
         self.tree.column("#0", width=200)
         tsb = ttk.Scrollbar(tf, command=self.tree.yview)
         self.tree.config(yscrollcommand=tsb.set)
@@ -963,8 +1089,6 @@ class PDFEditor(tk.Tk):
         tsb.pack(side="left", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        pb = ttk.LabelFrame(left, text="페이지 편집 (Ctrl/Shift로 다중 선택)")
-        pb.pack(fill="x", padx=4, pady=4)
         btns = [("삭제", self.delete_selected), ("회전 90°", self.rotate_selected),
                 ("▲ 위로", lambda: self.move_selected(-1)), ("▼ 아래로", lambda: self.move_selected(1)),
                 ("위치 이동…", self.move_to), ("분할/추출…", self.split_dialog),
@@ -978,7 +1102,7 @@ class PDFEditor(tk.Tk):
 
         # ---- 가운데: 뷰어
         center = ttk.Frame(main)
-        main.add(center, minsize=420, stretch="always")
+        main.add(center, minsize=int(420 * s), stretch="always")
         bar1 = ttk.Frame(center)
         bar1.pack(fill="x", padx=4, pady=(3, 0))
         ttk.Button(bar1, text="열기", command=self.open_dialog).pack(side="left")
@@ -1029,9 +1153,10 @@ class PDFEditor(tk.Tk):
         self.status = ttk.Label(sf, text="PDF를 열어주세요 (Ctrl+O)", anchor="w", relief="sunken")
         self.status.pack(side="left", fill="x", expand=True)
 
-        # ---- 오른쪽: 도구 + (속성 / 레이어)
-        right = ttk.Frame(main)
-        main.add(right, minsize=280, width=300, stretch="never")
+        # ---- 오른쪽: 도구 + (속성 / 레이어) - 화면이 작거나 배율이 크면 세로 스크롤
+        self.right_panel = ScrollFrame(main, step=int(20 * s))
+        main.add(self.right_panel, minsize=int(280 * s), width=int(300 * s), stretch="never")
+        right = self.right_panel.body
         tl = ttk.LabelFrame(right, text="도구")
         tl.pack(fill="x", padx=6, pady=(6, 3))
         for text, val in [("선택 / 편집 (개체 이동·크기조절)", "select"), ("화면 이동 (드래그)", "hand"),
@@ -1055,10 +1180,25 @@ class PDFEditor(tk.Tk):
         nb.add(lay, text="  레이어  ")
         self._build_props(prop)
         self._build_layer_tab(lay)
+        self.right_nb = nb
+        self.right_panel.measure = self._right_need_h
+        nb.bind("<<NotebookTabChanged>>", lambda e: self.right_panel.refresh(), add="+")
+        self.right_panel.watch()
+
+    def _right_need_h(self):
+        """오른쪽 패널에 필요한 높이. 탭 묶음은 가장 큰 탭(속성) 대신 지금 보이는 탭 기준으로 센다
+        (레이어 탭일 때 버튼이 괜히 스크롤 아래로 밀리지 않게)"""
+        nb = self.right_nb
+        if not nb.select():
+            return self.right_panel.body.winfo_reqheight()
+        tabs = [nb.nametowidget(t) for t in nb.tabs()]
+        cur = nb.nametowidget(nb.select())
+        return (self.right_panel.body.winfo_reqheight()
+                - max(t.winfo_reqheight() for t in tabs) + cur.winfo_reqheight())
 
     def _build_props(self, parent):
         tip = ttk.Label(parent, text="※ 개체를 선택한 상태에서 값을 바꾸면 그 개체에 바로 적용됩니다.",
-                        foreground="#0a5", wraplength=250, justify="left")
+                        foreground="#0a5", wraplength=int(250 * self.ui), justify="left")
         tip.pack(anchor="w", padx=6, pady=(4, 0))
         tx = ttk.LabelFrame(parent, text="텍스트")
         tx.pack(fill="x", padx=4, pady=3)
@@ -1103,7 +1243,7 @@ class PDFEditor(tk.Tk):
         ttk.Spinbox(sh, from_=10, to=100, increment=10, textvariable=self.opacity_var,
                     width=6).grid(row=3, column=1, sticky="w")
 
-        hint = ttk.Label(parent, foreground="#555", justify="left", wraplength=250,
+        hint = ttk.Label(parent, foreground="#555", justify="left", wraplength=int(250 * self.ui),
                          text="[조작]\n· 텍스트: 클릭 후 바로 입력 (Ctrl+Enter·바깥 클릭=확정)\n"
                               "· 텍스트 핸들을 끌면 글자 크기 변경, 더블클릭=수정\n"
                               "· 선택: 드래그=이동, 핸들=크기, Delete=삭제\n"
@@ -1114,16 +1254,16 @@ class PDFEditor(tk.Tk):
     def _build_layer_tab(self, parent):
         ttk.Label(parent, text="현재 페이지의 레이어 (위 = 맨 앞)", foreground="#555").pack(
             anchor="w", padx=6, pady=(4, 0))
+        bf = ttk.Frame(parent)                    # 버튼을 먼저 아래에 붙여 목록에 밀리지 않게
+        bf.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
         lf = ttk.Frame(parent)
         lf.pack(fill="both", expand=True, padx=4, pady=3)
-        self.layer_tree = ttk.Treeview(lf, show="tree", selectmode="browse", height=12)
+        self.layer_tree = ttk.Treeview(lf, show="tree", selectmode="browse", height=6)
         ls = ttk.Scrollbar(lf, command=self.layer_tree.yview)
         self.layer_tree.config(yscrollcommand=ls.set)
         self.layer_tree.pack(side="left", fill="both", expand=True)
         ls.pack(side="left", fill="y")
         self.layer_tree.bind("<<TreeviewSelect>>", self.on_layer_select)
-        bf = ttk.Frame(parent)
-        bf.pack(fill="x", padx=4, pady=(0, 4))
         btns = [("▲ 앞으로", lambda: self.reorder("up")), ("▼ 뒤로", lambda: self.reorder("down")),
                 ("맨 앞으로", lambda: self.reorder("front")), ("맨 뒤로", lambda: self.reorder("back")),
                 ("표시 / 숨김", self.toggle_visible), ("이름 변경…", self.rename_obj),
