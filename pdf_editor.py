@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-JP-PDF EDITOR  v1.2  -  설치 없이 쓰는 오프라인 PDF 편집기 (레이어 방식)
+JP-PDF EDITOR  v1.2.1  -  설치 없이 쓰는 오프라인 PDF 편집기 (레이어 방식)
+
+ v1.2.1 변경
+ * 작은 모니터·화면 배율 125%/150%에서 화면이 잘리던 문제 수정
+   (오른쪽 패널 세로 스크롤, 왼쪽 페이지 편집 버튼 항상 표시, 위쪽 버튼 줄 자동 줄바꿈, 창 크기 배율 반영)
 
  v1.2 변경
  * 화면 캡처(Win+Shift+S, PrtSc) 후 Ctrl+V -> 이미지 레이어로 붙여넣기
@@ -38,7 +42,7 @@ except ImportError:  # 구버전 호환
     import fitz
 
 APP_TITLE = "JP-PDF EDITOR"
-APP_VERSION = "1.2"
+APP_VERSION = "1.2.1"
 PROJ_EXT = ".pdfedit"
 THUMB_W, THUMB_H = 110, 140
 PAD = 12
