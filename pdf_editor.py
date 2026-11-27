@@ -756,6 +756,55 @@ def screen_work_area(root):
     return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight() - 60
 
 
+class FlowBar(ttk.Frame):
+    """버튼 줄: pack(side="left")로 넣은 위젯을 그대로 늘어놓되, 폭이 모자라면 다음 줄로 넘긴다.
+    (작은 모니터나 화면 배율 125%·150%에서 위쪽 버튼 줄 오른쪽 끝 '실행취소' 등이 잘리던 문제)"""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self._items = None
+        self._last_w = None
+        self.bind("<Configure>", self._layout)
+
+    def _collect(self):
+        items = []
+        for w in self.pack_slaves():
+            info = w.pack_info()
+            pv = info.get("padx", 0)
+            pv = pv if isinstance(pv, (tuple, list)) else self.tk.splitlist(str(pv))
+            px = [int(float(str(v))) for v in pv] or [0]
+            items.append((w, px[0], px[-1], info.get("fill") in ("y", "both")))
+            w.pack_forget()
+        self._items = items
+
+    def _layout(self, _e=None):
+        if self._items is None:
+            self._collect()
+        width = self.winfo_width()
+        if width <= 1 or width == self._last_w or not self._items:
+            return
+        self._last_w = width
+        rows, x = [[]], 0
+        for item in self._items:
+            w, l, r, _fy = item
+            need = l + w.winfo_reqwidth() + r
+            if x + need > width and rows[-1]:
+                rows.append([])
+                x = 0
+            rows[-1].append((item, x))
+            x += need
+        y = 0
+        for row in rows:
+            h = max(it[0].winfo_reqheight() for it, _x in row)
+            for (w, l, _r, fy), x in row:
+                if fy:
+                    w.place(x=x + l, y=y, height=h)
+                else:
+                    w.place(x=x + l, y=y + (h - w.winfo_reqheight()) // 2)
+            y += h + 2
+        self.configure(height=y)
+
+
 class ScrollFrame(ttk.Frame):
     """세로 스크롤 영역 (내용은 .body 에 넣는다).
     공간이 넉넉하면 내용이 영역 높이만큼 늘어나고, 모자라면 스크롤바가 나타나 마우스 휠로 내려 볼 수 있다.
@@ -1103,20 +1152,20 @@ class PDFEditor(tk.Tk):
         # ---- 가운데: 뷰어
         center = ttk.Frame(main)
         main.add(center, minsize=int(420 * s), stretch="always")
-        bar1 = ttk.Frame(center)
+        bar1 = FlowBar(center)                  # 폭이 모자라면 다음 줄로
         bar1.pack(fill="x", padx=4, pady=(3, 0))
         ttk.Button(bar1, text="열기", command=self.open_dialog).pack(side="left")
         ttk.Button(bar1, text="저장", command=self.save).pack(side="left", padx=2)
         ttk.Button(bar1, text="PDF로 저장 (레이어 합침)", command=self.save_as_pdf).pack(side="left", padx=2)
         ttk.Button(bar1, text="작업파일 저장 (레이어 유지)", command=self.save_project_as).pack(side="left", padx=2)
         ttk.Button(bar1, text="↶ 실행취소", command=self.undo).pack(side="left", padx=(10, 2))
-        nav = ttk.Frame(center)
+        nav = FlowBar(center)
         nav.pack(fill="x", padx=4, pady=3)
         ttk.Button(nav, text="◀", width=3, command=lambda: self.goto(self.cur - 1)).pack(side="left")
         self.page_entry = ttk.Entry(nav, width=5, justify="center")
         self.page_entry.pack(side="left", padx=2)
         self.page_entry.bind("<Return>", self.on_page_entry)
-        self.page_total = ttk.Label(nav, text="/ 0")
+        self.page_total = ttk.Label(nav, text="/ 0", width=7)     # 폭 고정 (버튼 줄 배치가 밀리지 않게)
         self.page_total.pack(side="left")
         ttk.Button(nav, text="▶", width=3, command=lambda: self.goto(self.cur + 1)).pack(side="left", padx=2)
         ttk.Separator(nav, orient="vertical").pack(side="left", fill="y", padx=8)
